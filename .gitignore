@@ -1,0 +1,13 @@
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Large data files
+data/raw/*.csv
+data/processed/*.csv
+
+# Legacy prototype archive
+legacy_prototype/
