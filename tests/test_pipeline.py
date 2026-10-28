@@ -1,18 +1,9 @@
-"""Unit tests for simplified SchemeSeva audit and preprocessing pipeline.
-
-Uses a temporary, isolated synthetic fixture to test edge cases without
-touching real government scheme datasets.
-"""
-
-from __future__ import annotations
-
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 import pandas as pd
 
-# Ensure 'src' is importable
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -28,14 +19,12 @@ from main import (
 )
 
 
-class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
-    """Test suite covering data loading, audit checks, and preprocessing."""
+class TestSchemeSevaPipeline(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.dir_path = Path(self.temp_dir.name)
 
-        # Create a small, controlled synthetic test fixture
         self.fixture_csv = self.dir_path / "fixture_schemes.csv"
         fixture_data = [
             {
@@ -49,7 +38,7 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
                 "Official Link": "https://pmkisan.gov.in",
             },
             {
-                # Duplicate candidate of row 1 (same name, minor case/punctuation difference)
+                # Similar name candidate with minor punctuation/casing differences
                 "Scheme Name": "pm kisan samman nidhi!",
                 "Description": "Alternative record for PM Kisan with identical scheme name.",
                 "Benefits": "Financial assistance to farmers.",
@@ -60,7 +49,7 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
                 "Official Link": "https://pmkisan.gov.in/portal",
             },
             {
-                # Exact duplicate of row 1 (for testing exact duplicate row detection)
+                # Exact duplicate of row 1 across all content fields
                 "Scheme Name": "PM Kisan Samman Nidhi",
                 "Description": "Income support scheme providing 6000 rupees annually to eligible small and marginal farmer families.",
                 "Benefits": "Rs 6000 per year paid in three equal four-monthly installments directly into bank accounts.",
@@ -71,7 +60,6 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
                 "Official Link": "https://pmkisan.gov.in",
             },
             {
-                # Short description
                 "Scheme Name": "State Dairy Loan Scheme",
                 "Description": "Short text.",
                 "Benefits": "Subsidy on cattle loans.",
@@ -82,18 +70,17 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
                 "Official Link": "http://dairy.punjab.gov.in",
             },
             {
-                # Missing eligibility and malformed URL
                 "Scheme Name": "Rural Housing Grant",
                 "Description": "Housing assistance for rural homeless households with low income.",
                 "Benefits": "Construction grant of Rs 1,20,000.",
-                "Eligibility Criteria": "",  # missing
+                "Eligibility Criteria": "",
                 "Application Process": "Gram Panchayat recommendation.",
                 "State / UT / Ministry": "Rural Development",
                 "Level": "State",
-                "Official Link": "not-a-valid-url",  # malformed
+                "Official Link": "not-a-valid-url",
             },
             {
-                # Insufficient information (missing description, eligibility, benefits)
+                # Missing multiple core fields
                 "Scheme Name": "Old Incomplete Scheme",
                 "Description": "",
                 "Benefits": "",
@@ -108,8 +95,6 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
-
-    # --- Loading & Column Mapping Tests ---
 
     def test_load_dataset_valid_csv(self):
         df = load_dataset(self.fixture_csv)
@@ -144,13 +129,11 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
         self.assertIn("scheme_name", df.columns)
         self.assertIn("record_id", df.columns)
 
-    # --- Audit Tests ---
-
     def test_audit_flags_exact_duplicates(self):
         df = load_dataset(self.fixture_csv)
         _, issues_df = audit_dataset(df)
         exact_dups = issues_df[issues_df["issue_type"] == "EXACT_DUPLICATE_ROW"]
-        self.assertGreaterEqual(len(exact_dups), 2)
+        self.assertEqual(len(exact_dups), 2)
 
     def test_audit_flags_duplicate_name_candidates(self):
         df = load_dataset(self.fixture_csv)
@@ -184,11 +167,8 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
     def test_audit_does_not_drop_records(self):
         df = load_dataset(self.fixture_csv)
         summary_df, issues_df = audit_dataset(df)
-        # Original df length must remain intact
         self.assertEqual(len(df), 6)
         self.assertGreater(len(issues_df), 0)
-
-    # --- Cleaning & Preprocessing Tests ---
 
     def test_clean_text_normalizes_whitespace(self):
         raw = "  Eligible for small farmers\n\twith land < 2 hectares.   Not eligible for institutional landholders.  "
@@ -226,11 +206,8 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
     def test_preprocessing_retains_all_records(self):
         df = load_dataset(self.fixture_csv)
         clean_df, search_df = preprocess_data(df)
-        # Incomplete schemes are retained without silent dropping
         self.assertEqual(len(clean_df), len(df))
         self.assertEqual(len(search_df), len(df))
-
-    # --- End-to-end Pipeline Execution Test ---
 
     def test_run_pipeline_exports_all_four_files(self):
         temp_raw = self.dir_path / "data" / "raw" / "gov_myscheme_data.csv"
@@ -256,7 +233,6 @@ class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
             self.assertEqual(counts["clean_records"], 6)
             self.assertEqual(counts["search_records"], 6)
 
-            # Check that all four expected files exist
             self.assertTrue(main.AUDIT_SUMMARY_PATH.exists())
             self.assertTrue(main.RECORD_ISSUES_PATH.exists())
             self.assertTrue(main.CLEAN_SCHEMES_PATH.exists())
