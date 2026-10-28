@@ -1,7 +1,7 @@
-"""Unit tests for SchemeSeva audit, verification, and preprocessing pipeline.
+"""Unit tests for simplified SchemeSeva audit and preprocessing pipeline.
 
-Uses a temporary, clearly labelled test dataset fixture. Does not touch or
-mix with real government scheme datasets.
+Uses a temporary, isolated synthetic fixture to test edge cases without
+touching real government scheme datasets.
 """
 
 from __future__ import annotations
@@ -20,19 +20,16 @@ if str(SRC_DIR) not in sys.path:
 from main import (
     clean_text,
     is_valid_url,
-    is_gov_domain,
     standardize_level,
     load_dataset,
     audit_dataset,
-    build_or_update_review,
-    apply_verification_decisions,
-    preprocess_verified,
+    preprocess_data,
     run_pipeline,
 )
 
 
-class TestSchemeSevaPipeline(unittest.TestCase):
-    """Test suite covering data loading, audit checks, verification, and preprocessing."""
+class TestSimplifiedSchemeSevaPipeline(unittest.TestCase):
+    """Test suite covering data loading, audit checks, and preprocessing."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -74,7 +71,7 @@ class TestSchemeSevaPipeline(unittest.TestCase):
                 "Official Link": "https://pmkisan.gov.in",
             },
             {
-                # Non-gov URL and short description
+                # Short description
                 "Scheme Name": "State Dairy Loan Scheme",
                 "Description": "Short text.",
                 "Benefits": "Subsidy on cattle loans.",
@@ -82,7 +79,7 @@ class TestSchemeSevaPipeline(unittest.TestCase):
                 "Application Process": "Visit district cooperative bank.",
                 "State / UT / Ministry": "Punjab Animal Husbandry",
                 "Level": "State / UT Government",
-                "Official Link": "http://private-dairy-loans.org/info",
+                "Official Link": "http://dairy.punjab.gov.in",
             },
             {
                 # Missing eligibility and malformed URL
@@ -112,22 +109,9 @@ class TestSchemeSevaPipeline(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    # --- Loading & Schema tests ---
+    # --- Loading & Column Mapping Tests ---
 
-    def test_missing_dataset_raises_clear_error(self):
-        missing_path = self.dir_path / "non_existent.csv"
-        with self.assertRaises(FileNotFoundError) as ctx:
-            load_dataset(missing_path)
-        self.assertIn("Raw dataset not found", str(ctx.exception))
-
-    def test_missing_scheme_name_column_raises_value_error(self):
-        bad_csv = self.dir_path / "bad.csv"
-        pd.DataFrame({"RandomCol": [1, 2], "Details": ["A", "B"]}).to_csv(bad_csv, index=False)
-        with self.assertRaises(ValueError) as ctx:
-            load_dataset(bad_csv)
-        self.assertIn("missing required scheme name", str(ctx.exception))
-
-    def test_load_dataset_maps_columns_and_assigns_ids(self):
+    def test_load_dataset_valid_csv(self):
         df = load_dataset(self.fixture_csv)
         self.assertEqual(len(df), 6)
         expected_cols = [
@@ -138,23 +122,29 @@ class TestSchemeSevaPipeline(unittest.TestCase):
             self.assertIn(col, df.columns)
         self.assertTrue(df["record_id"].iloc[0].startswith("SCH_"))
 
-    # --- URL and domain check tests ---
+    def test_load_dataset_missing_file_raises_clear_error(self):
+        missing_path = self.dir_path / "non_existent.csv"
+        with self.assertRaises(FileNotFoundError) as ctx:
+            load_dataset(missing_path)
+        self.assertIn("Raw dataset not found", str(ctx.exception))
+        self.assertIn("https://github.com/Aryan-Pardeshi/gov-myscheme-dataset", str(ctx.exception))
 
-    def test_is_valid_url(self):
-        self.assertTrue(is_valid_url("https://pmkisan.gov.in"))
-        self.assertTrue(is_valid_url("http://myscheme.gov.in/schemes"))
-        self.assertFalse(is_valid_url("not-a-url"))
-        self.assertFalse(is_valid_url(""))
-        self.assertFalse(is_valid_url(None))
+    def test_load_dataset_missing_scheme_name_raises_error(self):
+        bad_csv = self.dir_path / "bad.csv"
+        pd.DataFrame({"RandomColumn": [1, 2], "Details": ["A", "B"]}).to_csv(bad_csv, index=False)
+        with self.assertRaises(ValueError) as ctx:
+            load_dataset(bad_csv)
+        self.assertIn("missing required scheme name", str(ctx.exception))
 
-    def test_is_gov_domain(self):
-        self.assertTrue(is_gov_domain("https://pmkisan.gov.in/portal"))
-        self.assertTrue(is_gov_domain("https://serviceonline.nic.in/service"))
-        self.assertTrue(is_gov_domain("https://www.myscheme.gov.in/schemes/pm-kisan"))
-        self.assertFalse(is_gov_domain("http://private-dairy-loans.org/info"))
-        self.assertFalse(is_gov_domain("https://commercial-scheme-blog.com"))
+    def test_load_dataset_empty_dataframe(self):
+        empty_csv = self.dir_path / "empty.csv"
+        pd.DataFrame(columns=["Scheme Name", "Description", "Benefits"]).to_csv(empty_csv, index=False)
+        df = load_dataset(empty_csv)
+        self.assertEqual(len(df), 0)
+        self.assertIn("scheme_name", df.columns)
+        self.assertIn("record_id", df.columns)
 
-    # --- Audit tests ---
+    # --- Audit Tests ---
 
     def test_audit_flags_exact_duplicates(self):
         df = load_dataset(self.fixture_csv)
@@ -168,85 +158,50 @@ class TestSchemeSevaPipeline(unittest.TestCase):
         name_dups = issues_df[issues_df["issue_type"] == "DUPLICATE_NAME_CANDIDATE"]
         self.assertGreaterEqual(len(name_dups), 2)
 
-    def test_audit_flags_short_description_and_missing_fields(self):
+    def test_audit_missing_values_and_short_descriptions(self):
         df = load_dataset(self.fixture_csv)
         summary_df, issues_df = audit_dataset(df)
-
         metrics = dict(zip(summary_df["metric"], summary_df["value"]))
+
         self.assertEqual(metrics["total_records"], 6)
         self.assertGreater(metrics["short_description_count (<30 chars)"], 0)
         self.assertGreater(metrics["missing_eligibility_count"], 0)
-        self.assertGreater(metrics["malformed_source_url_count"], 0)
+        self.assertGreater(metrics["missing_benefits_count"], 0)
 
-        short_desc_issues = issues_df[issues_df["issue_type"] == "SHORT_DESCRIPTION"]
-        self.assertTrue(any(short_desc_issues["scheme_name"].str.contains("Dairy")))
+        short_desc = issues_df[issues_df["issue_type"] == "SHORT_DESCRIPTION"]
+        self.assertTrue(any(short_desc["scheme_name"].str.contains("Dairy")))
 
-        malformed_url_issues = issues_df[issues_df["issue_type"] == "MALFORMED_SOURCE_URL"]
-        self.assertTrue(any(malformed_url_issues["scheme_name"].str.contains("Housing")))
-
-    # --- Verification & Human Decision tests ---
-
-    def test_initial_review_sheet_never_marks_verified_or_inactive(self):
+    def test_audit_malformed_and_missing_urls(self):
         df = load_dataset(self.fixture_csv)
-        review_file = self.dir_path / "scheme_review.csv"
-        review_df = build_or_update_review(df, review_path=review_file, check_urls=False)
+        _, issues_df = audit_dataset(df)
 
-        statuses = review_df["verification_status"].tolist()
-        self.assertNotIn("VERIFIED", statuses)
-        self.assertNotIn("INACTIVE", statuses)
-        # Gov URLs are UNVERIFIED pending review; missing/non-gov are NEEDS_REVIEW
-        self.assertTrue(all(s in ("UNVERIFIED", "NEEDS_REVIEW") for s in statuses))
+        malformed = issues_df[issues_df["issue_type"] == "MALFORMED_SOURCE_URL"]
+        self.assertTrue(any(malformed["scheme_name"].str.contains("Housing")))
 
-    def test_unverified_records_cannot_enter_verified_dataset(self):
+        missing_url = issues_df[issues_df["issue_type"] == "MISSING_SOURCE_URL"]
+        self.assertTrue(any(missing_url["scheme_name"].str.contains("Old Incomplete")))
+
+    def test_audit_does_not_drop_records(self):
         df = load_dataset(self.fixture_csv)
-        review_file = self.dir_path / "scheme_review.csv"
-        review_df = build_or_update_review(df, review_path=review_file, check_urls=False)
+        summary_df, issues_df = audit_dataset(df)
+        # Original df length must remain intact
+        self.assertEqual(len(df), 6)
+        self.assertGreater(len(issues_df), 0)
 
-        # With no human review, verified_df must be empty
-        verified_df, pending_df, inactive_df = apply_verification_decisions(df, review_df)
-        self.assertEqual(len(verified_df), 0)
-        self.assertEqual(len(pending_df), 6)
-        self.assertEqual(len(inactive_df), 0)
+    # --- Cleaning & Preprocessing Tests ---
 
-    def test_human_decisions_applied_and_preserved(self):
-        df = load_dataset(self.fixture_csv)
-        review_file = self.dir_path / "scheme_review.csv"
-        review_df = build_or_update_review(df, review_path=review_file, check_urls=False)
-
-        # Simulate human reviewer entering decisions:
-        # Mark SCH_0001 as VERIFIED with official evidence URL
-        # Mark SCH_0006 as INACTIVE
-        review_df.loc[review_df["record_id"] == "SCH_0001", "verification_status"] = "VERIFIED"
-        review_df.loc[review_df["record_id"] == "SCH_0001", "official_evidence_url"] = "https://pmkisan.gov.in"
-        review_df.loc[review_df["record_id"] == "SCH_0001", "reviewer_notes"] = "Confirmed against Ministry of Agriculture portal."
-
-        review_df.loc[review_df["record_id"] == "SCH_0006", "verification_status"] = "INACTIVE"
-        review_df.loc[review_df["record_id"] == "SCH_0006", "reviewer_notes"] = "Scheme discontinued."
-        review_df.to_csv(review_file, index=False)
-
-        # Test preserving human decisions on re-read/update
-        updated_review = build_or_update_review(df, review_path=review_file, check_urls=False)
-        sch1 = updated_review[updated_review["record_id"] == "SCH_0001"].iloc[0]
-        self.assertEqual(sch1["verification_status"], "VERIFIED")
-        self.assertEqual(sch1["reviewer_notes"], "Confirmed against Ministry of Agriculture portal.")
-
-        sch6 = updated_review[updated_review["record_id"] == "SCH_0006"].iloc[0]
-        self.assertEqual(sch6["verification_status"], "INACTIVE")
-
-        # Partitioning
-        verified_df, pending_df, inactive_df = apply_verification_decisions(df, updated_review)
-        self.assertEqual(len(verified_df), 1)
-        self.assertEqual(len(inactive_df), 1)
-        self.assertEqual(len(pending_df), 4)
-        self.assertEqual(verified_df.iloc[0]["record_id"], "SCH_0001")
-
-    # --- Preprocessing tests ---
-
-    def test_clean_text_normalizes_spaces_and_preserves_content(self):
+    def test_clean_text_normalizes_whitespace(self):
         raw = "  Eligible for small farmers\n\twith land < 2 hectares.   Not eligible for institutional landholders.  "
         cleaned = clean_text(raw)
         self.assertEqual(cleaned, "Eligible for small farmers with land < 2 hectares. Not eligible for institutional landholders.")
-        self.assertIn("Not eligible", cleaned)
+
+    def test_preserve_negations_and_criteria(self):
+        raw = "Small farmers only; not eligible if age > 60 or income > 2,00,000."
+        cleaned = clean_text(raw)
+        self.assertIn("not eligible", cleaned)
+        self.assertIn("only", cleaned)
+        self.assertIn("age > 60", cleaned)
+        self.assertIn("income > 2,00,000", cleaned)
 
     def test_standardize_level(self):
         self.assertEqual(standardize_level("central"), "Central Government")
@@ -255,47 +210,33 @@ class TestSchemeSevaPipeline(unittest.TestCase):
         self.assertEqual(standardize_level("State / UT Government"), "State / UT Government")
         self.assertEqual(standardize_level("State"), "State / UT Government")
 
-    def test_preprocessing_search_text_and_no_none_or_nan(self):
-        # Prepare a mock verified row
-        mock_verified = pd.DataFrame([{
-            "record_id": "SCH_0001",
-            "scheme_name": " PM Kisan ",
-            "description": "Income support for small farmers.\nAnnual grant of 6000 rupees. ",
-            "benefits": "6000 rupees direct transfer.",
-            "eligibility": "Small and marginal farmers only; not eligible if income tax payer.",
-            "application_process": "Apply via official portal.",
-            "department": "Agriculture",
-            "level": "central",
-            "source_url": "https://pmkisan.gov.in",
-            "verification_status": "VERIFIED",
-        }])
+    def test_search_text_generation_and_no_nan_or_none(self):
+        df = load_dataset(self.fixture_csv)
+        clean_df, search_df = preprocess_data(df)
 
-        cleaned_df, excluded = preprocess_verified(mock_verified)
-        self.assertEqual(len(cleaned_df), 1)
-        self.assertEqual(len(excluded), 0)
+        self.assertEqual(len(clean_df), 6)
+        self.assertEqual(len(search_df), 6)
+        self.assertIn("search_text", search_df.columns)
 
-        row = cleaned_df.iloc[0]
-        self.assertEqual(row["level"], "Central Government")
-        self.assertIn("search_text", cleaned_df.columns)
+        for text in search_df["search_text"]:
+            words = text.split()
+            self.assertNotIn("nan", words)
+            self.assertNotIn("None", words)
 
-        search_txt = row["search_text"]
-        # Must not contain string literals like "nan" or "None"
-        self.assertNotIn("nan", search_txt.lower())
-        self.assertNotIn("none", search_txt.lower())
-        # Must preserve negations and criteria
-        self.assertIn("not eligible", search_txt.lower())
-        self.assertIn("income tax payer", search_txt.lower())
+    def test_preprocessing_retains_all_records(self):
+        df = load_dataset(self.fixture_csv)
+        clean_df, search_df = preprocess_data(df)
+        # Incomplete schemes are retained without silent dropping
+        self.assertEqual(len(clean_df), len(df))
+        self.assertEqual(len(search_df), len(df))
 
-    # --- End-to-end run_pipeline test on temporary workspace ---
+    # --- End-to-end Pipeline Execution Test ---
 
-    def test_run_pipeline_end_to_end_on_fixture(self):
-        # Create a mini project layout in temp dir
+    def test_run_pipeline_exports_all_four_files(self):
         temp_raw = self.dir_path / "data" / "raw" / "gov_myscheme_data.csv"
         temp_raw.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(pd.read_csv(self.fixture_csv)).to_csv(temp_raw, index=False)
 
-        # Run pipeline pointing to temp fixture
-        # Patch paths temporarily in main module
         import main
         orig_raw = main.RAW_DATA_PATH
         orig_proc = main.PROCESSED_DIR
@@ -307,34 +248,27 @@ class TestSchemeSevaPipeline(unittest.TestCase):
             main.REPORTS_DIR = self.dir_path / "reports"
             main.AUDIT_SUMMARY_PATH = main.REPORTS_DIR / "audit_summary.csv"
             main.RECORD_ISSUES_PATH = main.REPORTS_DIR / "record_issues.csv"
-            main.SCHEME_REVIEW_PATH = main.REPORTS_DIR / "scheme_review.csv"
-            main.VERIFIED_PATH = main.PROCESSED_DIR / "verified_schemes.csv"
-            main.PENDING_PATH = main.PROCESSED_DIR / "pending_schemes.csv"
-            main.INACTIVE_PATH = main.PROCESSED_DIR / "inactive_schemes.csv"
-            main.CLEAN_VERIFIED_PATH = main.PROCESSED_DIR / "verified_schemes_clean.csv"
+            main.CLEAN_SCHEMES_PATH = main.PROCESSED_DIR / "schemes_clean.csv"
+            main.SEARCH_SCHEMES_PATH = main.PROCESSED_DIR / "schemes_for_search.csv"
 
-            counts = run_pipeline(raw_path=temp_raw, check_urls=False)
+            counts = run_pipeline(raw_path=temp_raw)
             self.assertEqual(counts["raw_records"], 6)
-            self.assertEqual(counts["verified_records"], 0)  # Honest unreviewed state
-            self.assertEqual(counts["pending_records"], 6)
+            self.assertEqual(counts["clean_records"], 6)
+            self.assertEqual(counts["search_records"], 6)
+
+            # Check that all four expected files exist
             self.assertTrue(main.AUDIT_SUMMARY_PATH.exists())
             self.assertTrue(main.RECORD_ISSUES_PATH.exists())
-            self.assertTrue(main.SCHEME_REVIEW_PATH.exists())
-            self.assertTrue(main.VERIFIED_PATH.exists())
-            self.assertTrue(main.PENDING_PATH.exists())
-            self.assertTrue(main.INACTIVE_PATH.exists())
-            self.assertTrue(main.CLEAN_VERIFIED_PATH.exists())
+            self.assertTrue(main.CLEAN_SCHEMES_PATH.exists())
+            self.assertTrue(main.SEARCH_SCHEMES_PATH.exists())
         finally:
             main.RAW_DATA_PATH = orig_raw
             main.PROCESSED_DIR = orig_proc
             main.REPORTS_DIR = orig_rep
             main.AUDIT_SUMMARY_PATH = orig_rep / "audit_summary.csv"
             main.RECORD_ISSUES_PATH = orig_rep / "record_issues.csv"
-            main.SCHEME_REVIEW_PATH = orig_rep / "scheme_review.csv"
-            main.VERIFIED_PATH = orig_proc / "verified_schemes.csv"
-            main.PENDING_PATH = orig_proc / "pending_schemes.csv"
-            main.INACTIVE_PATH = orig_proc / "inactive_schemes.csv"
-            main.CLEAN_VERIFIED_PATH = orig_proc / "verified_schemes_clean.csv"
+            main.CLEAN_SCHEMES_PATH = orig_proc / "schemes_clean.csv"
+            main.SEARCH_SCHEMES_PATH = orig_proc / "schemes_for_search.csv"
 
 
 if __name__ == "__main__":
